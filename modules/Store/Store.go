@@ -1,9 +1,11 @@
 package store
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"gorm.io/driver/mysql"
@@ -14,6 +16,7 @@ import (
 
 // StoreIface 接口定义（供 mqttclient 依赖）
 type StoreIface interface {
+	GetUserInfo(userid int) (*UserInfo, error)
 	GetHomesByUserID(userid int) ([]HomeItem, error)
 	GetHomeByGatewayId(gatewayId string) (*HomeItem, error)
 	UpdateHomeGateway(homeid int, gatewayID string) error
@@ -22,6 +25,7 @@ type StoreIface interface {
 	AddGateway(gatewayid string) (bool, error)
 	AddRoom(name string, homeid int) (*RoomItem, error)
 	AddNode(devEUI, name, description string, typ int, joinEUI, appKey, gatewayID string, roomID int) error
+	DeleteNodeByDevEui(devEui string) error
 	RecordSimulationData(devEui string, dataType int, value float64) error
 	RecordControlData(devEui string, isOpen bool) error
 	GetControlHistory(devEui string, limit int) ([]HistoryItem, error)
@@ -29,6 +33,15 @@ type StoreIface interface {
 	GetControlHistoryByTime(devEui string, limit int, sinceTime time.Time) ([]HistoryItem, error)
 	GetSimulationHistoryByTime(devEui string, limit int, sinceTime time.Time) ([]HistoryItem, error)
 	GetDeviceHistory(devEui string, limit int) ([]HistoryItem, error)
+	DeleteSimulationDataByDevEui(devEui string) error
+	DeleteControlDataByDevEui(devEui string) error
+	DeleteDeviceByDevEuiWithHistory(devEui string) error
+}
+
+type UserInfo struct {
+	UserID   int    `json:"userid"`
+	Username string `json:"username"`
+	Avatar   string `json:"avatar,omitempty"` // base64 编码的头像
 }
 
 // 复用 mqttclient 中的数据结构（或在此重新定义）
@@ -128,6 +141,33 @@ func NewMySQLStore(dsn string) (*MySQLStore, error) {
 
 	log.Println("[Store] MySQL connected successfully")
 	return &MySQLStore{db: db}, nil
+}
+
+// GetUserInfo 获取用户基本信息（含头像base64）
+func (s *MySQLStore) GetUserInfo(userid int) (*UserInfo, error) {
+	// 1. 查询用户名
+	var name string
+	err := s.db.Table("UserInfo").
+		Select("name").
+		Where("userid = ?", userid).
+		Scan(&name).Error
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. 读取头像文件并转base64
+	avatarPath := fmt.Sprintf("images/user_avatar/%d.webp", userid)
+	avatarBase64 := ""
+	if data, err := os.ReadFile(avatarPath); err == nil {
+		avatarBase64 = base64.StdEncoding.EncodeToString(data)
+	}
+	// 文件不存在时返回空字符串，客户端显示默认头像
+
+	return &UserInfo{
+		UserID:   userid,
+		Username: name,
+		Avatar:   avatarBase64,
+	}, nil
 }
 
 // GetHomesByUserID 查询用户的所有家庭
@@ -238,6 +278,11 @@ func (s *MySQLStore) AddNode(devEUI, name, description string, typ int, joinEUI,
 	}).Table("NodeInfo").Create(&node).Error
 }
 
+// DeleteNodeByDevEui 删除指定设备节点
+func (s *MySQLStore) DeleteNodeByDevEui(devEui string) error {
+	return s.db.Table("NodeInfo").Where("dev_eui = ?", devEui).Delete(nil).Error
+}
+
 // RecordSimulationData 记录模拟数据（温度 type=1, 湿度 type=2）
 // 存入表: SimulationHistroyData
 func (s *MySQLStore) RecordSimulationData(devEui string, dataType int, value float64) error {
@@ -327,4 +372,33 @@ func (s *MySQLStore) GetSimulationHistoryByTime(devEui string, limit int, sinceT
 
 	err := query.Order("receive_time DESC").Limit(limit).Scan(&items).Error
 	return items, err
+}
+
+// DeleteSimulationDataByDevEui 删除指定设备的所有模拟历史数据
+func (s *MySQLStore) DeleteSimulationDataByDevEui(devEui string) error {
+	return s.db.Table("SimulationHistroyData").Where("dev_eui = ?", devEui).Delete(nil).Error
+}
+
+// DeleteControlDataByDevEui 删除指定设备的所有控制历史数据
+func (s *MySQLStore) DeleteControlDataByDevEui(devEui string) error {
+	return s.db.Table("ControlHistoryData").Where("dev_eui = ?", devEui).Delete(nil).Error
+}
+
+// DeleteDeviceByDevEuiWithHistory 事务内删除设备及其历史数据
+func (s *MySQLStore) DeleteDeviceByDevEuiWithHistory(devEui string) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		// 1. 删除模拟历史数据
+		if err := tx.Table("SimulationHistroyData").Where("dev_eui = ?", devEui).Delete(nil).Error; err != nil {
+			return err
+		}
+		// 2. 删除控制历史数据
+		if err := tx.Table("ControlHistoryData").Where("dev_eui = ?", devEui).Delete(nil).Error; err != nil {
+			return err
+		}
+		// 3. 删除设备节点
+		if err := tx.Table("NodeInfo").Where("dev_eui = ?", devEui).Delete(nil).Error; err != nil {
+			return err
+		}
+		return nil
+	})
 }

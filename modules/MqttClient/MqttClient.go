@@ -58,6 +58,15 @@ func NewMqttClient(mqttBroker string) *MqttClient {
 
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
 		log.Println("MQTT Connected")
+		// 订阅获取用户信息请求：例如 1001/client/GetUserInfoRequest
+		if token := c.Subscribe("+/client/GetUserInfoRequest", 1, func(client mqtt.Client, msg mqtt.Message) {
+			r.handleGetUserInfoRequest(client, msg)
+		}); token.Wait() && token.Error() != nil {
+			log.Printf("Subscribe GetUserInfoRequest failed: %v", token.Error())
+		} else {
+			log.Printf("Subscribed GetUserInfoRequest successfully.")
+		}
+
 		// 订阅家庭列表请求：例如 1001/client/ListHomeRequest
 		if token := c.Subscribe("+/client/ListHomeRequest", 1, func(client mqtt.Client, msg mqtt.Message) {
 			r.handleListHomeRequest(client, msg)
@@ -101,6 +110,15 @@ func NewMqttClient(mqttBroker string) *MqttClient {
 			log.Printf("Subscribe UpdateDevices failed: %v", token.Error())
 		} else {
 			log.Printf("Subscribed UpdateDevices successfully.")
+		}
+
+		// 订阅删除设备请求：例如 1001/client/home/101/room/xxx/device/yyy/DeleteDevice
+		if token := c.Subscribe("+/+/home/+/room/+/device/+/DeleteDevice", 1, func(client mqtt.Client, msg mqtt.Message) {
+			r.handleDeleteDeviceRequest(client, msg)
+		}); token.Wait() && token.Error() != nil {
+			log.Printf("Subscribe DeleteDeviceRequest failed: %v", token.Error())
+		} else {
+			log.Printf("Subscribed DeleteDeviceRequest successfully.")
 		}
 
 		// 订阅设备数据上传主题
